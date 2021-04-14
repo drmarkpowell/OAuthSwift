@@ -270,8 +270,8 @@ open class OAuthSwiftClient: NSObject {
         }
     }
 
-    open func requestWithAutomaticAccessTokenRenewal(url: URL, method: OAuthSwiftHTTPRequest.Method, parameters: OAuthSwift.Parameters = [:], headers: OAuthSwift.Headers? = nil, contentType: String? = nil, accessTokenBasicAuthentification: Bool = false, accessTokenUrl: URLConvertible, onTokenRenewal: OAuthSwift.TokenRenewedHandler?, completionHandler completion: OAuthSwiftHTTPRequest.CompletionHandler?) {
-        self.request(url, method: method, parameters: parameters, headers: headers) { [weak self] result in
+    open func requestWithAutomaticAccessTokenRenewal(url: URL, method: OAuthSwiftHTTPRequest.Method, parameters: OAuthSwift.Parameters = [:], headers: OAuthSwift.Headers? = nil, body: Data? = nil, contentType: String? = nil, accessTokenBasicAuthentification: Bool = false, accessTokenUrl: URLConvertible, onTokenRenewal: OAuthSwift.TokenRenewedHandler?, completionHandler completion: OAuthSwiftHTTPRequest.CompletionHandler?) {
+        self.request(url, method: method, parameters: parameters, headers: headers, body: body) { [weak self] result in
             guard let this = self else {
                 OAuthSwift.retainError(completion)
                 return
@@ -291,7 +291,7 @@ open class OAuthSwiftClient: NSObject {
                             switch result {
                             case .success(let (credential, _, _)):
                                 onTokenRenewal(.success(credential))
-                                this.requestWithAutomaticAccessTokenRenewal(url: url, method: method, parameters: parameters, headers: headers, contentType: contentType, accessTokenBasicAuthentification: accessTokenBasicAuthentification, accessTokenUrl: accessTokenUrl, onTokenRenewal: nil, completionHandler: completion)
+                                this.requestWithAutomaticAccessTokenRenewal(url: url, method: method, parameters: parameters, headers: headers, body: body, contentType: contentType, accessTokenBasicAuthentification: accessTokenBasicAuthentification, accessTokenUrl: accessTokenUrl, onTokenRenewal: onTokenRenewal, completionHandler: completion)
                             case .failure(let error):
                                 if let completion = completion {
                                     completion(.failure(.tokenExpired(error: error)))
@@ -305,13 +305,98 @@ open class OAuthSwiftClient: NSObject {
                             completion(.failure(.tokenExpired(error: nil)))
                         }
                     }
-
-                default:
+                case OAuthSwiftError.requestError(let error, let request):
                     if let completion = completion {
-                        completion(.failure(.tokenExpired(error: nil)))
+                        completion(.failure(.requestError(error: error, request: request)))
+                    }
+                default:
+                   if let completion = completion {
+                        completion(.failure(error))
                     }
                 }
             }
         }
     }
 }
+
+extension OAuthSwiftClient {
+    open func requestWithAutomaticAccessTokenRenewal(url: URL, method: OAuthSwiftHTTPRequest.Method, parameters: OAuthSwift.Parameters = [:], headers: OAuthSwift.Headers? = nil, timeout: TimeInterval = 60.0, body: Data? = nil, contentType: String? = nil, accessTokenBasicAuthentification: Bool = false, accessTokenUrl: URLConvertible, onTokenRenewal: OAuthSwift.TokenRenewedHandler?, completionHandler completion: OAuthSwiftHTTPRequest.CompletionHandler?) {
+        self.request(url, method: method, parameters: parameters, headers: headers, timeout: timeout, body: body) { [weak self] result in
+            guard let this = self else {
+                OAuthSwift.retainError(completion)
+                return
+            }
+
+            switch result {
+            case .success(let response):
+                if let completion = completion {
+                    completion(.success(response))
+                }
+
+            case .failure(let error):
+                switch error {
+                case OAuthSwiftError.tokenExpired:
+                    if let onTokenRenewal = onTokenRenewal {
+                        let renewCompletionHandler: OAuthSwift.TokenCompletionHandler = { result in
+                            switch result {
+                            case .success(let (credential, _, _)):
+                                onTokenRenewal(.success(credential))
+                                this.requestWithAutomaticAccessTokenRenewal(url: url, method: method, parameters: parameters, headers: headers, body: body, contentType: contentType, accessTokenBasicAuthentification: accessTokenBasicAuthentification, accessTokenUrl: accessTokenUrl, onTokenRenewal: onTokenRenewal, completionHandler: completion)
+                            case .failure(let error):
+                                if let completion = completion {
+                                    completion(.failure(.tokenExpired(error: error)))
+                                }
+                            }
+                        }
+
+                        _ = this.renewAccessToken(accessTokenUrl: accessTokenUrl, withRefreshToken: this.credential.oauthRefreshToken, headers: headers, contentType: contentType, accessTokenBasicAuthentification: accessTokenBasicAuthentification, completionHandler: renewCompletionHandler)
+                    } else {
+                        if let completion = completion {
+                            completion(.failure(.tokenExpired(error: nil)))
+                        }
+                    }
+                case OAuthSwiftError.requestError(let error, let request):
+                    if let completion = completion {
+                        completion(.failure(.requestError(error: error, request: request)))
+                    }
+                default:
+                   if let completion = completion {
+                        completion(.failure(error))
+                    }
+                }
+            }
+        }
+    }
+    
+    @discardableResult
+    open func request(_ url: URLConvertible, method: OAuthSwiftHTTPRequest.Method, parameters: OAuthSwift.Parameters = [:], headers: OAuthSwift.Headers? = nil, timeout: TimeInterval = 60.0, body: Data? = nil, checkTokenExpiration: Bool = true, completionHandler completion: OAuthSwiftHTTPRequest.CompletionHandler?) -> OAuthSwiftRequestHandle? {
+
+        if checkTokenExpiration && self.credential.isTokenExpired() {
+            completion?(.failure(.tokenExpired(error: nil)))
+            return nil
+        }
+
+        guard url.url != nil else {
+            completion?(.failure(.encodingError(urlString: url.string)))
+            return nil
+        }
+
+        if let request = makeRequest(url, method: method, parameters: parameters, headers: headers, timeout: timeout, body: body) {
+            request.start(completionHandler: completion)
+            return request
+        }
+        return nil
+    }
+
+    open func makeRequest(_ url: URLConvertible, method: OAuthSwiftHTTPRequest.Method, parameters: OAuthSwift.Parameters = [:], headers: OAuthSwift.Headers? = nil, timeout: TimeInterval = 60.0, body: Data? = nil) -> OAuthSwiftHTTPRequest? {
+        guard let url = url.url else {
+            return nil // XXX failure not thrown here
+        }
+
+        let request = OAuthSwiftHTTPRequest(url: url, method: method, parameters: parameters, paramsLocation: self.paramsLocation, httpBody: body, headers: headers ?? [:], sessionFactory: self.sessionFactory)
+        request.config.urlRequest.timeoutInterval = timeout
+        request.config.updateRequest(credential: self.credential)
+        return request
+    }
+}
+
